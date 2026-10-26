@@ -1,34 +1,21 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { ArrowRight, FileText, Search, ShieldCheck, Trash2, Users } from 'lucide-react'
 import { Link, Navigate } from 'react-router-dom'
+import { ActionButton } from '../../components/ui/ActionButton'
+import { getAuthToken } from '../../lib/auth-token'
+import type { AdminUser, ApiErrorResponse, PaginatedResponse, Post, User } from '../../types/api'
 import './AdminPanel.css'
 
-type User = { id: number; username: string; email: string; role: 'member' | 'admin' }
-type AdminUser = User & { created_at: string }
-type Post = {
-  id: number
-  title: string
-  content: string
-  topic: string
-  author_id: number
-  author: string
-  created_at: string
-  score: number
-  comments: number
-}
-type AdminPage<T> = { items: T[]; page: number; pageSize: number; total: number; totalPages: number }
-type ApiError = { error: string }
-
-const API_URL = import.meta.env.VITE_API_URL ?? ''
+const API_URL = import.meta.env['VITE_API_URL'] ?? ''
 
 async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem('devroom_token')
+  const token = getAuthToken()
   const headers = new Headers(options.headers)
   if (options.body) headers.set('Content-Type', 'application/json')
   if (token) headers.set('Authorization', `Bearer ${token}`)
   const response = await fetch(`${API_URL}/api${path}`, { ...options, headers })
-  let body: T | ApiError
-  try { body = await response.json() as T | ApiError }
+  let body: T | ApiErrorResponse
+  try { body = await response.json() as T | ApiErrorResponse }
   catch { throw new Error('Сервер вернул некорректный ответ') }
   if (!response.ok) throw new Error(body && typeof body === 'object' && 'error' in body ? body.error : 'Что-то пошло не так')
   return body as T
@@ -55,14 +42,14 @@ export default function AdminPanel({ user }: { user: User | null }) {
     const load = async () => {
       try {
         if (tab === 'posts') {
-          const result = await api<AdminPage<Post>>(`/admin/posts${params}`)
+          const result = await api<PaginatedResponse<Post>>(`/admin/posts${params}`)
           if (!active) return
           setPosts(result.items)
           setUsers([])
           setTotal(result.total)
           setTotalPages(result.totalPages)
         } else {
-          const result = await api<AdminPage<AdminUser>>(`/admin/users${params}`)
+          const result = await api<PaginatedResponse<AdminUser>>(`/admin/users${params}`)
           if (!active) return
           setUsers(result.items)
           setPosts([])
@@ -146,7 +133,7 @@ export default function AdminPanel({ user }: { user: User | null }) {
       {loading ? <div className="loading-state"><span className="spinner" /> Загружаем данные...</div> : tab === 'posts' ? <table className="admin-table"><thead><tr><th>Публикация</th><th>Сообщество</th><th>Автор</th><th>Дата</th><th aria-label="Действия" /></tr></thead><tbody>{posts.map(post => <tr key={post.id}><td><Link className="admin-post-title" to={`/posts/${post.id}`}>{post.title}</Link><span className="admin-row-caption">{post.score} голосов · {post.comments} комментариев</span></td><td><span className="admin-topic">d/{post.topic}</span></td><td>@{post.author}</td><td>{new Date(post.created_at).toLocaleDateString('ru-RU')}</td><td><button className="admin-delete" title="Удалить публикацию" aria-label={`Удалить: ${post.title}`} onClick={() => removePost(post)}><Trash2 size={16} /></button></td></tr>)}</tbody></table> : <table className="admin-table"><thead><tr><th>Участник</th><th>Роль</th><th>Регистрация</th><th aria-label="Действия" /></tr></thead><tbody>{users.map(target => <tr key={target.id}><td><strong className="admin-username">{target.username}</strong><span className="admin-row-caption">{target.email}</span></td><td><span className={`role-badge role-${target.role}`}>{target.role === 'admin' ? 'Администратор' : 'Участник'}</span></td><td>{new Date(target.created_at).toLocaleDateString('ru-RU')}</td><td><div className="admin-row-actions"><button className="role-action" onClick={() => changeRole(target)}>{target.role === 'admin' ? 'Снять админа' : 'Назначить админом'}</button>{target.role !== 'admin' && <button className="admin-delete" title="Удалить пользователя" aria-label={`Удалить пользователя ${target.username}`} onClick={() => removeUser(target)}><Trash2 size={16} /></button>}</div></td></tr>)}</tbody></table>}
       {!loading && !error && (tab === 'posts' ? posts.length : users.length) === 0 && <div className="empty-state"><Search size={27} /><h3>Ничего не найдено</h3><p>Измени запрос или сбрось поиск.</p><button className="button button-quiet" onClick={() => { setQuery(''); setSearch(''); setPage(1) }}>Сбросить поиск</button></div>}
     </div>
-    {!loading && totalPages > 1 && <div className="admin-pagination"><span>{total} {tab === 'posts' ? 'публикаций' : 'пользователей'}</span><div><button className="button button-quiet" disabled={page <= 1} onClick={() => { setLoading(true); setPage(value => value - 1) }}>← Назад</button><strong>{page} / {totalPages}</strong><button className="button button-quiet" disabled={page >= totalPages} onClick={() => { setLoading(true); setPage(value => value + 1) }}>Дальше →</button></div></div>}
+    {!loading && totalPages > 1 && <div className="admin-pagination"><span>{total} {tab === 'posts' ? 'публикаций' : 'пользователей'}</span><div><ActionButton tone="quiet" size="small" disabled={page <= 1} onClick={() => { setLoading(true); setPage(value => value - 1) }}>← Назад</ActionButton><strong>{page} / {totalPages}</strong><ActionButton tone="quiet" size="small" disabled={page >= totalPages} onClick={() => { setLoading(true); setPage(value => value + 1) }}>Дальше →</ActionButton></div></div>}
     {!loading && totalPages <= 1 && <p className="admin-total">Всего: {total} {tab === 'posts' ? 'публикаций' : 'пользователей'}</p>}
   </section>
 }

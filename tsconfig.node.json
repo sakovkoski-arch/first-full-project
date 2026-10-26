@@ -4,7 +4,13 @@
     "target": "es2023",
     "lib": ["ES2023"],
     "types": ["node"],
+    "allowJs": true,
+    "checkJs": true,
     "skipLibCheck": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitReturns": true,
+    "noPropertyAccessFromIndexSignature": true,
 
     /* Bundler mode */
     "module": "nodenext",
@@ -19,5 +25,5 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  "include": ["vite.config.ts", "eslint.config.js"]
 }

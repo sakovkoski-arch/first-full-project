@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: roomfordevs-api-6adf7fef
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    disk:
+      name: roomfordevs-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_PATH
+        value: /var/data/devroom.sqlite
+      - key: JWT_SECRET
+        generateValue: true
+      - key: CORS_ORIGIN
+        value: https://whimsical-cheesecake-95d8f7.netlify.app,https://6adf7fef8a800b06411c489f--whimsical-cheesecake-95d8f7.netlify.app
