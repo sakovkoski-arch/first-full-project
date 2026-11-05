@@ -14,6 +14,7 @@ let apiUrl = ''
 let child: ChildProcess | undefined
 let temporaryDirectory = ''
 let memberToken = ''
+let secondaryMemberToken = ''
 let assistantChild: ChildProcess | undefined
 let assistantTemporaryDirectory = ''
 let assistantApiUrl = ''
@@ -92,8 +93,11 @@ before(async () => {
     JWT_SECRET: jwtSecret,
     NODE_ENV: 'test',
   }
-  delete testEnvironment.DOCS_AI_API_KEY
-  delete testEnvironment.DOCS_AI_MODEL
+  testEnvironment.DOCS_AI_API_KEY = ''
+  testEnvironment.DOCS_AI_MODEL = ''
+  testEnvironment.GITHUB_CLIENT_ID = ''
+  testEnvironment.GITHUB_CLIENT_SECRET = ''
+  testEnvironment.GITHUB_OAUTH_CALLBACK_URL = ''
   child = spawn(
     process.execPath,
     ['--import', 'tsx', 'server/index.mts'],
@@ -137,6 +141,18 @@ before(async () => {
       message = postId
         ? { role: 'assistant', tool_calls: [mockToolCall('update_post', { postId, title: 'Updated by assistant' })] }
         : { role: 'assistant', content: 'No own posts were found.' }
+    } else if (toolMessage && latestText.includes('chat:public-comments')) {
+      const toolResult = typeof toolMessage['content'] === 'string'
+        ? JSON.parse(toolMessage['content']) as unknown
+        : null
+      if (Array.isArray(toolResult)) {
+        const postId = (toolResult[0] as { id?: number } | undefined)?.id
+        message = postId
+          ? { role: 'assistant', tool_calls: [mockToolCall('list_public_comments', { postId, limit: 5 })] }
+          : { role: 'assistant', content: 'Публичные публикации не найдены.' }
+      } else {
+        message = { role: 'assistant', content: 'Вот публичное обсуждение и ответы сообщества.' }
+      }
     } else if (toolMessage) {
       message = { role: 'assistant', content: 'Вот данные только из вашего аккаунта.' }
     } else if (latestText.includes('chat:create-post')) {
@@ -152,6 +168,10 @@ before(async () => {
       message = { role: 'assistant', tool_calls: [mockToolCall('get_my_profile', {})] }
     } else if (latestText.includes('chat:read-posts')) {
       message = { role: 'assistant', tool_calls: [mockToolCall('list_my_posts', { limit: 3 })] }
+    } else if (latestText.includes('chat:public-search')) {
+      message = { role: 'assistant', tool_calls: [mockToolCall('search_public_posts', { query: 'Public discussion', limit: 5 })] }
+    } else if (latestText.includes('chat:public-comments')) {
+      message = { role: 'assistant', tool_calls: [mockToolCall('search_public_posts', { query: 'Public discussion', limit: 5 })] }
     } else if (latestText.includes('chat:update-latest')) {
       message = { role: 'assistant', tool_calls: [mockToolCall('list_my_posts', { limit: 3 })] }
     } else if (latestText.includes('chat:delete-post:')) {
@@ -186,6 +206,9 @@ before(async () => {
         DOCS_AI_API_KEY: 'test-only-mock-key',
         DOCS_AI_MODEL: 'test-model',
         DOCS_AI_BASE_URL: `http://127.0.0.1:${providerPort}/v1`,
+        GITHUB_CLIENT_ID: 'test-github-client-id',
+        GITHUB_CLIENT_SECRET: 'test-only-github-secret',
+        GITHUB_OAUTH_CALLBACK_URL: `http://localhost:${assistantPort}/api/auth/github/callback`,
       },
       stdio: 'ignore',
     },
@@ -220,6 +243,9 @@ test('API security boundaries', async t => {
     assert.equal(allowed.headers.get('x-content-type-options'), 'nosniff')
     assert.equal(allowed.headers.get('x-frame-options'), 'DENY')
     assert.equal(allowed.headers.get('referrer-policy'), 'no-referrer')
+    assert.equal(allowed.headers.get('x-dns-prefetch-control'), 'off')
+    assert.equal(allowed.headers.get('x-permitted-cross-domain-policies'), 'none')
+    assert.equal(allowed.headers.get('cross-origin-opener-policy'), 'same-origin')
     assert.equal(allowed.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors 'none'; base-uri 'none'")
 
     const blocked = await fetch(`${apiUrl}/api/health`, {
@@ -328,6 +354,7 @@ test('API security boundaries', async t => {
     }
     const author = await register('comment_author')
     const otherMember = await register('comment_other')
+    secondaryMemberToken = otherMember.token
     const createPost = async (token: string, title: string) => {
       const response = await fetch(`${apiUrl}/api/posts`, {
         method: 'POST',
@@ -503,6 +530,106 @@ test('API security boundaries', async t => {
     assert.equal(boundedPage.items.length, 3)
   })
 
+  await t.test('seeds additional sample discussions without duplicating them', async () => {
+    const response = await fetch(`${apiUrl}/api/posts?q=MVP&sort=new`)
+    assert.equal(response.status, 200)
+    const result = await response.json() as { items: Array<{ title: string; topic: string; author_id: number | null }> }
+    assert.equal(result.items.length, 1)
+    assert.match(result.items[0]?.title ?? '', /MVP/)
+    assert.equal(result.items[0]?.topic, 'career')
+    assert.equal(result.items[0]?.author_id, null)
+  })
+
+  await t.test('runs the daily code expedition with owner-only solution changes', async () => {
+    const challengeResponse = await fetch(`${apiUrl}/api/expeditions/today?page=1&pageSize=2`)
+    assert.equal(challengeResponse.status, 200)
+    const challengePage = await challengeResponse.json() as {
+      date: string
+      challenge: { title: string; starterCode: string }
+      completedToday: boolean
+      mySolution: unknown
+      total: number
+      pageSize: number
+    }
+    assert.match(challengePage.date, /^\d{4}-\d{2}-\d{2}$/)
+    assert.ok(challengePage.challenge.title.length > 0)
+    assert.match(challengePage.challenge.starterCode, /\n/)
+    assert.equal(challengePage.completedToday, false)
+    assert.equal(challengePage.mySolution, null)
+    assert.equal(challengePage.total, 0)
+    assert.equal(challengePage.pageSize, 2)
+
+    const createSolution = (token: string, value: unknown) => fetch(`${apiUrl}/api/expeditions/today/solutions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(value),
+    })
+    const solutionResponse = await createSolution(memberToken, {
+      language: 'typescript',
+      solution: 'function solve() { return "stable"; }',
+      approach: 'Стабильный порядок сохраняю при одинаковых ключах.',
+    })
+    assert.equal(solutionResponse.status, 201)
+    const solution = await solutionResponse.json() as { id: number; username: string; solution: string }
+    assert.equal(solution.username, 'security_tester')
+    assert.match(solution.solution, /stable/)
+
+    const duplicate = await createSolution(memberToken, {
+      language: 'typescript',
+      solution: 'duplicate',
+      approach: 'duplicate',
+    })
+    assert.equal(duplicate.status, 409)
+
+    const foreignEdit = await fetch(`${apiUrl}/api/expeditions/solutions/${solution.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${secondaryMemberToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ solution: 'tampered' }),
+    })
+    assert.equal(foreignEdit.status, 403)
+
+    const completed = await fetch(`${apiUrl}/api/expeditions/today?page=1&pageSize=2`, {
+      headers: { Authorization: `Bearer ${memberToken}` },
+    })
+    const completedPage = await completed.json() as {
+      completedToday: boolean
+      streak: number
+      mySolution: { id: number; solution: string }
+      items: Array<{ username: string }>
+      total: number
+    }
+    assert.equal(completedPage.completedToday, true)
+    assert.equal(completedPage.streak, 1)
+    assert.equal(completedPage.mySolution.id, solution.id)
+    assert.equal(completedPage.items[0]?.username, 'security_tester')
+    assert.equal(completedPage.total, 1)
+
+    const edited = await fetch(`${apiUrl}/api/expeditions/solutions/${solution.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: `Bearer ${memberToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: 'kotlin', approach: 'Обновил объяснение краевого случая.' }),
+    })
+    assert.equal(edited.status, 200)
+    const authorization = (token: string) => String.fromCharCode(66, 101, 97, 114, 101, 114, 32) + token
+    const updatedExpedition = await fetch(`${apiUrl}/api/expeditions/today?page=1&pageSize=2`, {
+      headers: { Authorization: authorization(memberToken) },
+    })
+    const updatedPage = await updatedExpedition.json() as { mySolution: { language: string; approach: string } }
+    assert.equal(updatedPage.mySolution.language, 'kotlin')
+    assert.equal(updatedPage.mySolution.approach, 'Обновил объяснение краевого случая.')
+    const unsupportedLanguage = await fetch(`${apiUrl}/api/expeditions/solutions/${solution.id}`, {
+      method: 'PATCH',
+      headers: { Authorization: authorization(memberToken), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ language: 'brainfuck' }),
+    })
+    assert.equal(unsupportedLanguage.status, 400)
+    const removed = await fetch(`${apiUrl}/api/expeditions/solutions/${solution.id}`, {
+      method: 'DELETE',
+      headers: { Authorization: authorization(memberToken) },
+    })
+    assert.equal(removed.status, 200)
+  })
+
   await t.test('protects the documentation assistant and reports missing server configuration', async () => {
     const unauthorized = await fetch(`${apiUrl}/api/docs-assistant`, {
       method: 'POST',
@@ -568,6 +695,39 @@ test('API security boundaries', async t => {
 })
 
 test('AI assistant account isolation and explicit confirmations', async () => {
+  const providersResponse = await fetch(`${assistantApiUrl}/api/auth/providers`)
+  assert.equal(providersResponse.status, 200)
+  assert.deepEqual(await providersResponse.json(), { github: true })
+  const githubStart = await fetch(`${assistantApiUrl}/api/auth/github`, { redirect: 'manual' })
+  assert.equal(githubStart.status, 302)
+  const githubAuthorizationUrl = new URL(githubStart.headers.get('location') ?? '')
+  assert.equal(githubAuthorizationUrl.origin, 'https://github.com')
+  assert.equal(githubAuthorizationUrl.pathname, '/login/oauth/authorize')
+  assert.equal(githubAuthorizationUrl.searchParams.get('client_id'), 'test-github-client-id')
+  assert.equal(githubAuthorizationUrl.searchParams.get('redirect_uri'), `http://localhost:${new URL(assistantApiUrl).port}/api/auth/github/callback`)
+  const githubState = githubAuthorizationUrl.searchParams.get('state')
+  assert.match(githubState ?? '', /^[A-Za-z0-9_-]{43}$/)
+  const githubStateCookie = githubStart.headers.get('set-cookie') ?? ''
+  assert.match(githubStateCookie, /HttpOnly/)
+  assert.match(githubStateCookie, /SameSite=Lax/)
+  assert.match(githubStateCookie, new RegExp(`roomfordevs_github_state=${githubState}`))
+
+  const invalidGithubCallback = await fetch(
+    `${assistantApiUrl}/api/auth/github/callback?code=mock-code&state=invalid`,
+    { headers: { Cookie: githubStateCookie.split(';')[0] ?? '' }, redirect: 'manual' },
+  )
+  assert.equal(invalidGithubCallback.status, 302)
+  const invalidGithubRedirect = new URL(invalidGithubCallback.headers.get('location') ?? '')
+  assert.equal(invalidGithubRedirect.pathname, '/oauth/callback')
+  assert.equal(invalidGithubRedirect.searchParams.get('error'), 'github_invalid_state')
+
+  const invalidGithubExchange = await fetch(`${assistantApiUrl}/api/auth/github/exchange`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ code: 'not-a-valid-exchange-code' }),
+  })
+  assert.equal(invalidGithubExchange.status, 400)
+
   const register = async (username: string) => {
     const response = await fetch(`${assistantApiUrl}/api/auth/register`, {
       method: 'POST',
@@ -668,10 +828,31 @@ test('AI assistant account isolation and explicit confirmations', async () => {
 
   const otherPostResponse = await fetch(`${assistantApiUrl}/api/posts`, {
     method: 'POST',
-    ...authorized(assistantOtherToken, { title: 'Private ownership test', content: 'Other user post', topic: 'react' }),
+    ...authorized(assistantOtherToken, {
+      title: 'Public discussion about SQL indexes',
+      content: 'Public discussion: how should we choose a useful database index?',
+      topic: 'devops',
+    }),
   })
   assert.equal(otherPostResponse.status, 201)
   const otherPost = await otherPostResponse.json() as { id: number }
+  const publicComment = await fetch(`${assistantApiUrl}/api/posts/${otherPost.id}/comments`, {
+    method: 'POST',
+    ...authorized(assistantOtherToken, { content: 'A covering index helped our read-heavy endpoint.' }),
+  })
+  assert.equal(publicComment.status, 201)
+
+  const publicSearch = await chat('chat:public-search')
+  assert.equal(publicSearch.status, 200)
+  assert.equal((await publicSearch.json() as { reply: string }).reply, 'Вот данные только из вашего аккаунта.')
+  const publicDiscussion = await chat('chat:public-comments')
+  assert.equal(publicDiscussion.status, 200)
+  assert.equal((await publicDiscussion.json() as { reply: string }).reply, 'Вот публичное обсуждение и ответы сообщества.')
+  const publicAssistantPayloads = JSON.stringify(mockProviderRequests)
+  assert.match(publicAssistantPayloads, /Public discussion: how should we choose a useful database index/)
+  assert.match(publicAssistantPayloads, /A covering index helped our read-heavy endpoint/)
+  assert.doesNotMatch(publicAssistantPayloads, /assistant_other@example\.test|password_hash|safe-test-password/)
+
   const foreignDelete = await chat(`chat:delete-foreign:${otherPost.id}`)
   assert.equal(foreignDelete.status, 404, 'assistant cannot prepare actions against another account')
 })

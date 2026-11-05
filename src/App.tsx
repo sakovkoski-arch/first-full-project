@@ -1,6 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  ArrowDown, ArrowRight, ArrowUp, Bookmark, Bot, Check, ChevronDown,
+  ArrowDown, ArrowRight, ArrowUp, Bookmark, Bot, Check, ChevronDown, Compass,
   Clock3, Code2, Flame, Hash, LogOut, Menu, MessageCircle, Plus, Search,
   Send, ShieldCheck, Sparkles, Users,
 } from 'lucide-react'
@@ -9,6 +9,7 @@ import { ActionButton, ActionLink } from './components/ui/ActionButton'
 import AdminPanel from './features/admin/AdminPanel'
 import AssistantChat from './features/assistant/AssistantChat'
 import CommentsSection from './features/comments/CommentsSection'
+import CodeExpeditions from './features/expeditions/CodeExpeditions'
 import DocsAssistant from './features/docs-assistant/DocsAssistant'
 import MembersDirectory from './features/members/MembersDirectory'
 import PublicProfile from './features/profile/PublicProfile'
@@ -40,6 +41,22 @@ async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
     throw error
   }
   return body as T
+}
+
+const githubExchangeRequests = new Map<string, Promise<AuthResponse>>()
+function exchangeGithubCode(code: string): Promise<AuthResponse> {
+  const existing = githubExchangeRequests.get(code)
+  if (existing) return existing
+  const request = api<AuthResponse>('/auth/github/exchange', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  })
+  githubExchangeRequests.set(code, request)
+  void request.then(
+    () => window.setTimeout(() => githubExchangeRequests.delete(code), 10_000),
+    () => githubExchangeRequests.delete(code),
+  )
+  return request
 }
 
 function useAuth() {
@@ -82,6 +99,7 @@ function AppShell({ user, onLogout, children }: { user: User | null; onLogout: (
         <Link className={`nav-link ${location.pathname === '/' ? 'nav-active' : ''}`} to="/"><Flame size={18} /> Лента <span className="nav-hot">HOT</span></Link>
         <Link className={`nav-link ${location.pathname === '/communities' ? 'nav-active' : ''}`} to="/communities"><Hash size={18} /> Сообщества</Link>
         <Link className={`nav-link ${location.pathname === '/members' ? 'nav-active' : ''}`} to="/members"><Users size={18} /> Участники</Link>
+        <Link className={`nav-link ${location.pathname === '/expeditions' ? 'nav-active' : ''}`} to="/expeditions"><Compass size={18} /> Экспедиции</Link>
         <Link className={`nav-link ${location.pathname === '/assistant' ? 'nav-active' : ''}`} to={user ? '/assistant' : '/login'}><Bot size={18} /> ИИ-чат</Link>
         <Link className={`nav-link ${location.pathname === '/docs-assistant' ? 'nav-active' : ''}`} to={user ? '/docs-assistant' : '/login'}><Sparkles size={18} /> Документация</Link>
         <div className="sidebar-divider" />
@@ -274,7 +292,15 @@ function AuthPage({ mode, onAuth }: { mode: 'login' | 'register'; onAuth: (user:
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [githubEnabled, setGithubEnabled] = useState(false)
   const register = mode === 'register'
+  useEffect(() => {
+    let active = true
+    api<{ github: boolean }>('/auth/providers')
+      .then(providers => { if (active) setGithubEnabled(providers.github) })
+      .catch(() => { if (active) setError('Не удалось проверить доступность способов входа.') })
+    return () => { active = false }
+  }, [])
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setLoading(true); setError('')
     try { const result = await api<AuthResponse>(`/auth/${mode}`, { method: 'POST', body: JSON.stringify(register ? { username, email, password } : { email, password }) }); onAuth(result.user, result.token); navigate('/') }
@@ -319,6 +345,12 @@ function AuthPage({ mode, onAuth }: { mode: 'login' | 'register'; onAuth: (user:
               {loading ? 'Подождите...' : register ? 'Создать аккаунт' : 'Войти'} <ArrowRight size={16} />
             </ActionButton>
           </form>
+          {githubEnabled && <>
+            <div className="auth-divider"><span>или</span></div>
+            <a className="github-auth-button" href={`${API_URL}/api/auth/github`}>
+              <Code2 size={17} /> Продолжить с GitHub
+            </a>
+          </>}
           <p className="auth-switch">
             {register ? 'Уже есть аккаунт?' : 'Впервые в roomfordevs?'}{' '}
             <Link to={register ? '/login' : '/register'}>
@@ -332,12 +364,49 @@ function AuthPage({ mode, onAuth }: { mode: 'login' | 'register'; onAuth: (user:
   )
 }
 
+function GithubOAuthCallback({ onAuth }: { onAuth: (user: User, token: string) => void }) {
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
+  const started = useRef(false)
+  const [exchangeError, setExchangeError] = useState('')
+  const [loading, setLoading] = useState(() => Boolean(searchParams.get('code') && !searchParams.get('error')))
+  const code = searchParams.get('code')
+  const providerError = searchParams.get('error')
+  useEffect(() => {
+    if (started.current) return
+    started.current = true
+    if (providerError || !code) return
+    navigate('/oauth/callback', { replace: true })
+    exchangeGithubCode(code)
+      .then(result => {
+        onAuth(result.user, result.token)
+        navigate('/', { replace: true })
+      })
+      .catch((cause: unknown) => {
+        setExchangeError(cause instanceof Error ? cause.message : 'Не удалось завершить вход через GitHub.')
+      })
+      .finally(() => setLoading(false))
+  }, [code, navigate, onAuth, providerError])
+
+  const error = providerError === 'github_access_denied'
+    ? 'Вход через GitHub отменён.'
+    : providerError || !code
+      ? 'Не удалось завершить вход через GitHub. Попробуйте ещё раз.'
+      : exchangeError
+
+  return <section className="oauth-callback">
+    {loading
+      ? <><span className="spinner" /> Завершаем вход через GitHub...</>
+      : <><p className="form-error" role="alert">{error}</p><Link className="button button-dark" to="/login">Вернуться ко входу</Link></>}
+  </section>
+}
+
 function Application() {
   const { user, setUser, checked } = useAuth()
   const logout = () => { clearAuthToken(); setUser(null) }
   const auth = (nextUser: User, token: string) => { saveAuthToken(token); setUser(nextUser) }
   if (!checked) return <div className="boot-screen"><Code2 size={26} /><span>roomfordevs<span className="brand-period">.</span></span></div>
-  return <Routes><Route path="/login" element={<PageTransition><AuthPage mode="login" onAuth={auth} /></PageTransition>} /><Route path="/register" element={<PageTransition><AuthPage mode="register" onAuth={auth} /></PageTransition>} /><Route path="*" element={<AppShell user={user} onLogout={logout}><Routes><Route path="/" element={<Feed user={user} />} /><Route path="/communities" element={<Communities />} /><Route path="/members" element={<MembersDirectory request={api} />} /><Route path="/assistant" element={user ? <AssistantChat request={api} onUsernameChange={username => setUser(current => current ? { ...current, username } : current)} /> : <Navigate to="/login" replace />} /><Route path="/docs-assistant" element={user ? <DocsAssistant request={api} /> : <Navigate to="/login" replace />} /><Route path="/admin" element={<AdminPanel user={user} />} /><Route path="/submit" element={<SubmitPost user={user} />} /><Route path="/posts/:id" element={<PostDetail user={user} />} /><Route path="/users/:username" element={<PublicProfile request={api} />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></AppShell>} /></Routes>
+  return <Routes><Route path="/login" element={<PageTransition><AuthPage mode="login" onAuth={auth} /></PageTransition>} /><Route path="/register" element={<PageTransition><AuthPage mode="register" onAuth={auth} /></PageTransition>} /><Route path="/oauth/callback" element={<PageTransition><GithubOAuthCallback onAuth={auth} /></PageTransition>} /><Route path="*" element={<AppShell user={user} onLogout={logout}><Routes><Route path="/" element={<Feed user={user} />} /><Route path="/communities" element={<Communities />} /><Route path="/members" element={<MembersDirectory request={api} />} /><Route path="/expeditions" element={<CodeExpeditions user={user} request={api} />} /><Route path="/assistant" element={user ? <AssistantChat request={api} onUsernameChange={username => setUser(current => current ? { ...current, username } : current)} /> : <Navigate to="/login" replace />} /><Route path="/docs-assistant" element={user ? <DocsAssistant request={api} /> : <Navigate to="/login" replace />} /><Route path="/admin" element={<AdminPanel user={user} />} /><Route path="/submit" element={<SubmitPost user={user} />} /><Route path="/posts/:id" element={<PostDetail user={user} />} /><Route path="/users/:username" element={<PublicProfile request={api} />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></AppShell>} /></Routes>
 }
 
 export default function App() { return <BrowserRouter><Application /></BrowserRouter> }
